@@ -7,6 +7,18 @@ use syn::{Ident, Path, Type};
 use crate::codegen::{DefaultExpression, PostfixTransform};
 use crate::usage::{self, IdentRefSet, IdentSet, UsesTypeParams};
 
+fn is_option(ty: &Type) -> bool {
+    if let Type::Path(path) = ty {
+        if let Some(last_seg) = path.path.segments.last() {
+            last_seg.ident == "Option" && !last_seg.arguments.is_empty()
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
 /// Properties needed to generate code for a field in all the contexts
 /// where one may appear.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +171,18 @@ impl<'a> ToTokens for MatchArm<'a> {
 /// Wrapper to generate initialization code for a field.
 pub struct Initializer<'a>(&'a Field<'a>);
 
+impl<'a> Initializer<'a> {
+    fn option_aware_default(&self) -> Option<Cow<'a, DefaultExpression>> {
+        if let Some(explicit_default) = self.0.default_expression.as_ref() {
+            Some(Cow::Borrowed(explicit_default))
+        } else if is_option(self.0.ty) {
+            Some(Cow::Owned(DefaultExpression::Trait))
+        } else {
+            None
+        }
+    }
+}
+
 impl<'a> ToTokens for Initializer<'a> {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let field: &Field = self.0;
@@ -173,7 +197,7 @@ impl<'a> ToTokens for Initializer<'a> {
             } else {
                 quote!(#ident: #ident)
             }
-        } else if let Some(ref expr) = field.default_expression {
+        } else if let Some(ref expr) = self.option_aware_default() {
             quote!(#ident: match #ident.1 {
                 ::darling::export::Some(__val) => __val,
                 ::darling::export::None => #expr,
@@ -199,5 +223,27 @@ impl<'a> ToTokens for CheckMissing<'a> {
                 }
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_option;
+    use syn::parse_quote;
+
+    #[test]
+    fn is_option_simple() {
+        assert!(is_option(&parse_quote!(Option<Foo>)));
+    }
+
+    #[test]
+    fn is_option_path() {
+        assert!(is_option(&parse_quote!(::std::option::Option<(i32, i64)>)));
+        assert!(is_option(&parse_quote!(::core::option::Option<[i32; 4]>)));
+    }
+
+    #[test]
+    fn is_option_result() {
+        assert!(!is_option(&parse_quote!(Result<Example, Error>)));
     }
 }
